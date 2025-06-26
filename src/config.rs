@@ -1,5 +1,6 @@
+use serde::Deserialize;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct RapidServerConfig {
     pub no_delay: bool,
     pub address: String,

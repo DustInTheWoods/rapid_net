@@ -13,3 +13,4 @@ env_logger = "0.11"
 futures = "0.3.31"
 thiserror = "2.0.12"
 log = "0.4.27"
+serde = { version = "1.0.219", features = ["derive"] }
