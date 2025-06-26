@@ -12,7 +12,7 @@ use crate::config::RapidServerConfig;
 use crate::message::{ClientEvent, ServerEvent};
 use crate::{rapid_debug, rapid_error, rapid_info, rapid_warn};
 use futures::future::join_all;   // im Cargo.toml: futures = "0.3"
-
+use log;
 /// Error types that can occur during server operations
 #[derive(Debug)]
 pub enum ServerError {
