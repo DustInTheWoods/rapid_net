@@ -186,52 +186,54 @@ impl RapidServer {
     }
 
     pub async fn broadcast(&self, mut msg: RapidTlvMessage, exclude: Option<&HashSet<Uuid>>) -> Result<(), ServerError> {
-        // First, encode the message at once to get its bytes
         let encoded = match msg.encode() {
             Ok(bytes) => bytes.to_vec(),
             Err(_) => return Err(ServerError::EncodingFailed),
         };
 
-        // Collect all client IDs first to avoid holding the hashmap lock during async operations
         let client_entries: Vec<_> = self
             .clients
             .iter()
-            .filter(|entry| {
-                exclude.map_or(true, |set| !set.contains(entry.key()))
-            })
+            .filter(|entry| exclude.map_or(true, |set| !set.contains(entry.key())))
             .map(|e| (*e.key(), e.value().clone()))
             .collect();
 
-        // Create futures for each client
+        rapid_debug!(
+            "Broadcast start – type 0x{:02X}, size {} B → {} Clients ({} excluded)",
+            msg.event_type,
+            encoded.len(),
+            client_entries.len(),
+            exclude.map_or(0, |s| s.len())
+        );
+        
         let tasks = client_entries.into_iter().map(|(id, client)| {
-            // Create a new message for each client from the encoded bytes
-            let msg_bytes = bytes::Bytes::from(encoded.clone());
+            let encoded_bytes = encoded.clone();
 
             async move {
-                // Parse a new message for each client
-                let msg = match RapidTlvMessage::parse(msg_bytes) {
-                    Ok(new_msg) => new_msg,
+                // Neue Message aus dem gecachten Byte-Slice erzeugen
+                let msg = match RapidTlvMessage::parse(bytes::Bytes::from(encoded_bytes)) {
+                    Ok(m) => m,
                     Err(_) => {
-                        rapid_error!("Failed to parse message for client {}", id);
+                        rapid_error!("Broadcast: Re-parse für {id} fehlgeschlagen");
                         return Err((id, ()));
                     }
                 };
 
-                // Send the message to the client
                 match client.send(msg).await {
-                    Ok(()) => Ok(()),
+                    Ok(()) => {
+                        rapid_debug!("Broadcast OK → {id}");
+                        Ok(())
+                    }
                     Err(e) => {
-                        rapid_error!("Broadcast to {} failed: {:?}", id, e);
+                        rapid_warn!("Broadcast FAIL → {id}: {e:?}");
                         Err((id, ()))
                     }
                 }
             }
         });
 
-        // Execute all tasks in parallel
         let results = join_all(tasks).await;
-
-        // Process results and clean up failed connections
+        
         let mut errors = Vec::new();
         for res in results {
             if let Err((id, e)) = res {
@@ -240,11 +242,20 @@ impl RapidServer {
             }
         }
 
-        // If all sending fail, return an error
-        if !errors.is_empty() && errors.len() == self.clients.len() {
-            Err(ServerError::BroadcastFailed(errors))
+        if !errors.is_empty() {
+            rapid_warn!(
+            "Broadcast beendet: {} Fehler / {} verbleibende Clients",
+            errors.len(),
+            self.clients.len()
+        );
+            // Nur Fehler melden, wenn *alle* Send-Ops scheiterten
+            if errors.len() == self.clients.len() {
+                return Err(ServerError::BroadcastFailed(errors));
+            }
         } else {
-            Ok(())
+            rapid_info!("Broadcast erfolgreich → {} Clients", self.clients.len());
         }
+
+        Ok(())
     }
 }
