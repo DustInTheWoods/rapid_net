@@ -1,3 +1,5 @@
+use log;
+
 #[macro_export]
 macro_rules! rapid_debug {
     ($($arg:tt)*) => {
