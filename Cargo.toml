@@ -1,0 +1,15 @@
+[package]
+name = "rapid_net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.45.1", features = ["net", "sync", "rt", "io-util", "time", "macros", "rt-multi-thread"] }
+uuid = { version = "1.17.0", features = ["v4"] }
+rapid_tlv = { path = "../rapid_tlv" }
+log = "0.4.27"
+bytes = "1.10.1"
+dashmap = "7.0.0-rc2"
+env_logger = "0.11"
+futures = "0.3.31"
+thiserror = "2.0.12"
