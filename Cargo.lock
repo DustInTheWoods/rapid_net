@@ -471,17 +471,9 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
- "rapid_tlv",
  "thiserror",
  "tokio",
  "uuid",
-]
-
-[[package]]
-name = "rapid_tlv"
-version = "0.1.0"
-dependencies = [
- "bytes",
 ]
 
 [[package]]
