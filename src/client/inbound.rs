@@ -17,7 +17,7 @@ impl InboundClient {
         addr: SocketAddr,
         to_app: Sender<ClientEvent>,
     ) -> Self {
-        let core = io_core::IoCore::new(stream, addr, Some(to_app));
+        let core = IoCore::new(stream, addr, Some(to_app));
         Self { core }
     }
 

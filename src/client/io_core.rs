@@ -85,7 +85,7 @@ impl IoCore {
         rapid_info!("Read task started for client {}", client_id);
 
         // Pre-allocate a reusable buffer with a reasonable size
-        let mut read_buffer = BytesMut::with_capacity(16 * 1024);
+        let mut read_buffer = BytesMut::with_capacity(4);
         let mut len_buf = [0u8; 4];
         let mut len_bytes_read = 0;
 
@@ -94,11 +94,8 @@ impl IoCore {
             while len_bytes_read < 4 {
                 rapid_debug!("Client {} reading message length, {} bytes read so far", client_id, len_bytes_read);
 
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    reader.read(&mut len_buf[len_bytes_read..])
-                ).await {
-                    Ok(Ok(n)) => {
+                match reader.read(&mut len_buf[len_bytes_read..]).await {
+                    Ok(n) => {
                         if n == 0 {
                             // Connection closed
                             rapid_debug!("Connection closed by peer for client {}", client_id);
@@ -107,7 +104,7 @@ impl IoCore {
                         len_bytes_read += n;
                         rapid_debug!("Client {} read {} bytes of length, total: {}/4", client_id, n, len_bytes_read);
                     },
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         return if e.kind() == std::io::ErrorKind::UnexpectedEof {
                             rapid_debug!("Connection closed by peer for client {}", client_id);
                             Err(ClientError::ConnectionClosed)
@@ -115,10 +112,6 @@ impl IoCore {
                             rapid_error!("Error reading message length for client {}: {:?}", client_id, e);
                             Err(ClientError::Io(e))
                         }
-                    },
-                    Err(_) => {
-                        rapid_error!("Timeout reading message length for client {}", client_id);
-                        return Err(ClientError::ReadTimeout);
                     }
                 }
             }
