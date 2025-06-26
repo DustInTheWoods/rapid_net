@@ -471,9 +471,18 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
+ "rapid_tlv",
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "rapid_tlv"
+version = "0.1.0"
+source = "git+https://github.com/DustInTheWoods/rapid_tlv#04cf8ebb5c0e3334988f09f80c6803eb5e7645b8"
+dependencies = [
+ "bytes",
 ]
 
 [[package]]
