@@ -70,6 +70,8 @@ impl RapidServer {
     }
 
     fn remove_client(&self, client_id: Uuid) {
+        rapid_debug!("Removing client {}", client_id);
+        
         self.clients.remove(&client_id);
     }
 
