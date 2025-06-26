@@ -7,7 +7,6 @@ edition = "2024"
 tokio = { version = "1.45.1", features = ["net", "sync", "rt", "io-util", "time", "macros", "rt-multi-thread"] }
 uuid = { version = "1.17.0", features = ["v4"] }
 rapid_tlv = {git = "https://github.com/DustInTheWoods/rapid_tlv"}
-log = "0.4.27"
 bytes = "1.10.1"
 dashmap = "7.0.0-rc2"
 env_logger = "0.11"
