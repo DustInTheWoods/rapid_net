@@ -67,6 +67,7 @@ impl OutboundClient {
                     let OutboundClient { core, recv_rx, cfg } = fresh;
                     self.core = core;
                     self.recv_rx = recv_rx;
+                    self.cfg = cfg;
                     return Ok(());
                 }
                 Err(e) => {
