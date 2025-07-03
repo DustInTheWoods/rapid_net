@@ -11,3 +11,4 @@ pub use client::{InboundClient, OutboundClient as RapidClient};
 pub use config::{RapidClientConfig, RapidServerConfig};
 pub use message::{ClientEvent, ServerEvent};
 pub use server::RapidServer;
+pub use rapid_tlv::*;
