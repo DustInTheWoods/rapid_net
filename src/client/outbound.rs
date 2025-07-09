@@ -32,7 +32,7 @@ impl OutboundClient {
         let (app_tx, app_rx) = mpsc::channel::<ClientEvent>(100);
 
         // Read-Loop soll laufen → Some(app_tx)
-        let core = io_core::IoCore::new(stream, addr, Some(app_tx));
+        let core = io_core::IoCore::new(stream, addr, Some(app_tx), cfg.thread_count());
 
         Ok(Self { core, recv_rx: app_rx, cfg: cfg.clone() })
     }

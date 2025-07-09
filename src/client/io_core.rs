@@ -25,34 +25,100 @@ impl IoCore {
         stream: TcpStream,
         addr: SocketAddr,
         to_app: Option<Sender<ClientEvent>>, // nur Inbound braucht das
+        thread_count: Option<usize>, // Optional thread count limit
     ) -> Self {
         let (reader, writer) = stream.into_split();
         let (write_tx, write_rx) = mpsc::channel::<RapidTlvMessage>(100);
         let id = Uuid::new_v4();
 
-        // ---------------- Write-Loop -----------------------------------
-        let write_jh = {
-            let id_clone = id;
-            tokio::spawn(async move {
-                if let Err(e) = Self::write_task(writer, write_rx).await {
-                    rapid_warn!("Write task error for client {}: {:?}", id_clone, e);
-                }
-            })
-        };
+        // If thread_count is Some(1), use a single thread for both reading and writing
+        // Otherwise, use separate threads as before
+        match thread_count {
+            Some(1) => {
+                // Single thread mode - create a combined task for both reading and writing
+                let (read_jh, write_jh) = if let Some(app) = to_app {
+                    // Create a channel to signal the combined task to stop
+                    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
 
-        // ---------------- Reader-Loop -----------------------------------
-        let read_jh = if let Some(app) = to_app {
-            let id_clone = id;
-            tokio::spawn(async move {
-                if let Err(e) = Self::read_task(reader, app, id_clone).await {
-                    rapid_warn!("Read task error for client {}: {:?}", id_clone, e);
-                }
-            })
-        } else {
-            tokio::spawn(async {})   // leeres Future -> JoinHandle<()>
-        };
+                    // Clone necessary values for the combined task
+                    let id_clone = id;
+                    let write_tx_clone = write_tx.clone();
 
-        Self { id, addr, write_tx, read_jh, write_jh }
+                    // Spawn a single task that handles both reading and writing
+                    let combined_jh = tokio::spawn(async move {
+                        // Create a future for the read task
+                        let read_future = Self::read_task(reader, app, id_clone);
+
+                        // Create a future for the write task
+                        let write_future = Self::write_task(writer, write_rx);
+
+                        // Use tokio::select to run both tasks concurrently and stop when either completes
+                        tokio::select! {
+                            read_result = read_future => {
+                                if let Err(e) = read_result {
+                                    rapid_warn!("Read task error for client {}: {:?}", id_clone, e);
+                                }
+                            },
+                            write_result = write_future => {
+                                if let Err(e) = write_result {
+                                    rapid_warn!("Write task error for client {}: {:?}", id_clone, e);
+                                }
+                            },
+                            _ = stop_rx.recv() => {
+                                rapid_info!("Combined task for client {} stopped by request", id_clone);
+                            }
+                        }
+                    });
+
+                    // Create a JoinHandle that aborts the combined task when dropped
+                    let abort_handle = tokio::spawn(async move {
+                        if stop_tx.send(()).await.is_err() {
+                            // The combined task has already completed
+                        }
+                    });
+
+                    (combined_jh, abort_handle)
+                } else {
+                    // No read task needed, just create a write task
+                    let id_clone = id;
+                    let write_jh = tokio::spawn(async move {
+                        if let Err(e) = Self::write_task(writer, write_rx).await {
+                            rapid_warn!("Write task error for client {}: {:?}", id_clone, e);
+                        }
+                    });
+
+                    (tokio::spawn(async {}), write_jh)
+                };
+
+                Self { id, addr, write_tx, read_jh, write_jh }
+            },
+            _ => {
+                // Default mode - separate threads for reading and writing
+                // ---------------- Write-Loop -----------------------------------
+                let write_jh = {
+                    let id_clone = id;
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::write_task(writer, write_rx).await {
+                            rapid_warn!("Write task error for client {}: {:?}", id_clone, e);
+                        }
+                    })
+                };
+
+                // ---------------- Reader-Loop -----------------------------------
+                let read_jh = if let Some(app) = to_app {
+                    let id_clone = id;
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::read_task(reader, app, id_clone).await {
+                            rapid_warn!("Read task error for client {}: {:?}", id_clone, e);
+                        }
+                    })
+                } else {
+                    tokio::spawn(async {})   // leeres Future -> JoinHandle<()>
+                };
+
+                Self { id, addr, write_tx, read_jh, write_jh }
+            }
+        }
     }
 
     /* ----------------------------------------------------------------
@@ -217,6 +283,8 @@ impl IoCore {
         let mut last_flush = std::time::Instant::now();
         // Flush interval in milliseconds
         const FLUSH_INTERVAL_MS: u128 = 50; // Flush at most every 50 ms
+        // Maximum chunk size for large messages to prevent stack overflow
+        const MAX_CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 
         // Try to batch messages if they arrive quickly
         let mut pending_messages = Vec::with_capacity(10);
@@ -234,12 +302,94 @@ impl IoCore {
                     match msg.encode() {
                         Ok(data) => {
                             // Store the encoded message for batched writing
-                            pending_messages.push(data.to_vec());
+                            let data_vec = data.to_vec();
+
+                            // Check if this is a large message that needs chunking
+                            if data_vec.len() > MAX_CHUNK_SIZE {
+                                rapid_debug!("Large message detected ({} bytes), chunking into {}KB pieces", 
+                                             data_vec.len(), MAX_CHUNK_SIZE / 1024);
+
+                                // Process large message in chunks to avoid stack overflow
+                                for chunk in data_vec.chunks(MAX_CHUNK_SIZE) {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        writer.write_all(chunk)
+                                    ).await {
+                                        Ok(Ok(_)) => {},
+                                        Ok(Err(e)) => {
+                                            rapid_error!("Error writing message chunk: {:?}", e);
+                                            return Err(ClientError::Io(e));
+                                        },
+                                        Err(_) => {
+                                            rapid_error!("Timeout writing message chunk");
+                                            return Err(ClientError::WriteTimeout);
+                                        }
+                                    }
+
+                                    // Flush after each chunk for large messages
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        writer.flush()
+                                    ).await {
+                                        Ok(Ok(_)) => {
+                                            last_flush = std::time::Instant::now();
+                                            rapid_debug!("Flushed chunk successfully");
+                                        },
+                                        Ok(Err(e)) => {
+                                            rapid_error!("Error flushing after chunk: {:?}", e);
+                                            return Err(ClientError::Io(e));
+                                        },
+                                        Err(_) => {
+                                            rapid_error!("Timeout flushing after chunk");
+                                            return Err(ClientError::FlushTimeout);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // For normal-sized messages, add to batch
+                                pending_messages.push(data_vec);
+                            }
 
                             // Process any additional pending messages without delay
                             while let Ok(mut next_msg) = rx.try_recv() {
                                 if let Ok(next_data) = next_msg.encode() {
-                                    pending_messages.push(next_data.to_vec());
+                                    let next_data_vec = next_data.to_vec();
+
+                                    // Check if this is a large message that needs immediate processing
+                                    if next_data_vec.len() > MAX_CHUNK_SIZE {
+                                        // First, write and flush any pending messages
+                                        if !pending_messages.is_empty() {
+                                            for data in &pending_messages {
+                                                if let Err(e) = Self::write_with_timeout(&mut writer, data).await {
+                                                    return Err(e);
+                                                }
+                                            }
+
+                                            if let Err(e) = Self::flush_with_timeout(&mut writer).await {
+                                                return Err(e);
+                                            }
+
+                                            last_flush = std::time::Instant::now();
+                                            pending_messages.clear();
+                                        }
+
+                                        // Now process the large message in chunks
+                                        rapid_debug!("Large message in batch ({} bytes), chunking", next_data_vec.len());
+                                        for chunk in next_data_vec.chunks(MAX_CHUNK_SIZE) {
+                                            if let Err(e) = Self::write_with_timeout(&mut writer, chunk).await {
+                                                return Err(e);
+                                            }
+
+                                            if let Err(e) = Self::flush_with_timeout(&mut writer).await {
+                                                return Err(e);
+                                            }
+
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                    } else {
+                                        // For normal-sized messages, add to batch
+                                        pending_messages.push(next_data_vec);
+                                    }
 
                                     // Limit batch size to avoid excessive memory usage
                                     if pending_messages.len() >= 10 {
@@ -248,44 +398,20 @@ impl IoCore {
                                 }
                             }
 
-                            // Write all pending messages
+                            // Write all pending normal-sized messages
                             for data in &pending_messages {
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    writer.write_all(data)
-                                ).await {
-                                    Ok(Ok(_)) => {},
-                                    Ok(Err(e)) => {
-                                        rapid_error!("Error writing message data: {:?}", e);
-                                        return Err(ClientError::Io(e));
-                                    },
-                                    Err(_) => {
-                                        rapid_error!("Timeout writing message data");
-                                        return Err(ClientError::WriteTimeout);
-                                    }
+                                if let Err(e) = Self::write_with_timeout(&mut writer, data).await {
+                                    return Err(e);
                                 }
                             }
 
                             // Only flush if enough time has passed since the last flush
                             let now = std::time::Instant::now();
                             if now.duration_since(last_flush).as_millis() >= FLUSH_INTERVAL_MS {
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    writer.flush()
-                                ).await {
-                                    Ok(Ok(_)) => {
-                                        last_flush = now;
-                                        rapid_debug!("Flushed writer successfully");
-                                    },
-                                    Ok(Err(e)) => {
-                                        rapid_error!("Error flushing writer: {:?}", e);
-                                        return Err(ClientError::Io(e));
-                                    },
-                                    Err(_) => {
-                                        rapid_error!("Timeout flushing writer");
-                                        return Err(ClientError::FlushTimeout);
-                                    }
+                                if let Err(e) = Self::flush_with_timeout(&mut writer).await {
+                                    return Err(e);
                                 }
+                                last_flush = now;
                             }
 
                             // Clear pending messages
@@ -307,28 +433,59 @@ impl IoCore {
                     // If we have pending messages, write and flush them
                     if !pending_messages.is_empty() {
                         for data in &pending_messages {
-                            if let Err(_) = tokio::time::timeout(
-                                std::time::Duration::from_secs(5),
-                                writer.write_all(data)
-                            ).await {
-                                rapid_error!("Timeout writing message data");
-                                return Err(ClientError::WriteTimeout);
+                            if let Err(e) = Self::write_with_timeout(&mut writer, data).await {
+                                return Err(e);
                             }
                         }
 
                         // Flush after writing all pending messages
-                        if let Err(_) = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            writer.flush()
-                        ).await {
-                            rapid_error!("Timeout flushing writer");
-                            return Err(ClientError::FlushTimeout);
+                        if let Err(e) = Self::flush_with_timeout(&mut writer).await {
+                            return Err(e);
                         }
 
                         last_flush = std::time::Instant::now();
                         pending_messages.clear();
                     }
                 }
+            }
+        }
+    }
+
+    // Helper method to write data with timeout
+    async fn write_with_timeout(writer: &mut OwnedWriteHalf, data: &[u8]) -> Result<(), ClientError> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            writer.write_all(data)
+        ).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                rapid_error!("Error writing message data: {:?}", e);
+                Err(ClientError::Io(e))
+            },
+            Err(_) => {
+                rapid_error!("Timeout writing message data");
+                Err(ClientError::WriteTimeout)
+            }
+        }
+    }
+
+    // Helper method to flush with timeout
+    async fn flush_with_timeout(writer: &mut OwnedWriteHalf) -> Result<(), ClientError> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            writer.flush()
+        ).await {
+            Ok(Ok(_)) => {
+                rapid_debug!("Flushed writer successfully");
+                Ok(())
+            },
+            Ok(Err(e)) => {
+                rapid_error!("Error flushing writer: {:?}", e);
+                Err(ClientError::Io(e))
+            },
+            Err(_) => {
+                rapid_error!("Timeout flushing writer");
+                Err(ClientError::FlushTimeout)
             }
         }
     }

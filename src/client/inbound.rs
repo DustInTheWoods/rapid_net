@@ -16,8 +16,9 @@ impl InboundClient {
         stream: TcpStream,
         addr: SocketAddr,
         to_app: Sender<ClientEvent>,
+        thread_count: Option<usize>,
     ) -> Self {
-        let core = IoCore::new(stream, addr, Some(to_app));
+        let core = IoCore::new(stream, addr, Some(to_app), thread_count);
         Self { core }
     }
 

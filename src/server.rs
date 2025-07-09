@@ -4,6 +4,7 @@ use std::fmt;
 use std::error::Error;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 use dashmap::DashMap;
 use rapid_tlv::RapidTlvMessage;
@@ -55,13 +56,22 @@ impl Error for ServerError {}
 pub struct RapidServer {
     cfg: RapidServerConfig,
     clients: DashMap<Uuid, Arc<InboundClient>>,
+    client_task_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl RapidServer {
     pub fn new(cfg: RapidServerConfig) -> Self {
+        // Initialize the semaphore if a thread count is specified for client tasks
+        let client_task_semaphore = cfg.thread_count().map(|count| {
+            // If thread_count is specified, create a semaphore with that many permits
+            // This will limit the number of concurrent client tasks
+            Arc::new(Semaphore::new(count))
+        });
+
         Self {
             cfg,
             clients: DashMap::new(),
+            client_task_semaphore,
         }
     }
 
@@ -71,7 +81,7 @@ impl RapidServer {
 
     fn remove_client(&self, client_id: Uuid) {
         rapid_debug!("Removing client {}", client_id);
-        
+
         self.clients.remove(&client_id);
     }
 
@@ -149,17 +159,36 @@ impl RapidServer {
 
                     // Create a channel with appropriate capacity (100 is usually enough)
                     let (client_tx, client_rx) = tokio::sync::mpsc::channel::<ClientEvent>(100);
-                    let client = Arc::new(InboundClient::from_stream(socket, addr, client_tx));
+                    let client = Arc::new(InboundClient::from_stream(socket, addr, client_tx, self.cfg.thread_count()));
 
                     self.add_client(Arc::clone(&client));
 
                     let server = Arc::clone(&self);
                     let app_tx = tx.clone();
 
-                    // Spawn the client task with a name for better debugging
-                    tokio::spawn(async move {
-                        server.client_task(client, client_rx, app_tx).await;
-                    });
+                    // Check if we need to limit the number of concurrent client tasks
+                    if let Some(semaphore) = &self.client_task_semaphore {
+                        // Clone the semaphore for use in the task
+                        let semaphore = Arc::clone(semaphore);
+
+                        // Spawn the client task with semaphore-based concurrency control
+                        tokio::spawn(async move {
+                            // Acquire a permit from the semaphore
+                            // This will block if all permits are in use, effectively limiting concurrency
+                            let permit = semaphore.acquire().await.unwrap();
+
+                            // Run the client task
+                            server.client_task(client, client_rx, app_tx).await;
+
+                            // The permit is automatically released when dropped at the end of this scope
+                            drop(permit);
+                        });
+                    } else {
+                        // No concurrency limit - spawn the client task directly
+                        tokio::spawn(async move {
+                            server.client_task(client, client_rx, app_tx).await;
+                        });
+                    }
                 }
                 Err(e) => {
                     rapid_error!("Error accepting connection: {:?}", e);
@@ -189,11 +218,13 @@ impl RapidServer {
     }
 
     pub async fn broadcast(&self, mut msg: RapidTlvMessage, exclude: Option<&HashSet<Uuid>>) -> Result<(), ServerError> {
+        // Encode the message once
         let encoded = match msg.encode() {
             Ok(bytes) => bytes.to_vec(),
             Err(_) => return Err(ServerError::EncodingFailed),
         };
 
+        // Get all clients that should receive the broadcast
         let client_entries: Vec<_> = self
             .clients
             .iter()
@@ -208,51 +239,61 @@ impl RapidServer {
             client_entries.len(),
             exclude.map_or(0, |s| s.len())
         );
-        
-        let tasks = client_entries.into_iter().map(|(id, client)| {
-            let encoded_bytes = encoded.clone();
 
-            async move {
-                // Neue Message aus dem gecachten Byte-Slice erzeugen
-                let msg = match RapidTlvMessage::parse(bytes::Bytes::from(encoded_bytes)) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        rapid_error!("Broadcast: Re-parse für {id} fehlgeschlagen");
-                        return Err((id, ()));
-                    }
-                };
+        // Process clients in batches to avoid stack overflow
+        const BATCH_SIZE: usize = 100;
+        let mut errors = Vec::new();
 
-                match client.send(msg).await {
-                    Ok(()) => {
-                        rapid_debug!("Broadcast OK → {id}");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        rapid_warn!("Broadcast FAIL → {id}: {e:?}");
-                        Err((id, ()))
+        // Process clients in batches
+        for chunk in client_entries.chunks(BATCH_SIZE) {
+            let tasks = chunk.iter().map(|(id, client)| {
+                let encoded_bytes = encoded.clone();
+                let id = *id;
+                let client = client.clone();
+
+                async move {
+                    // Create a new message from the cached byte slice
+                    let msg = match RapidTlvMessage::parse(bytes::Bytes::from(encoded_bytes)) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            rapid_error!("Broadcast: Re-parse für {id} fehlgeschlagen");
+                            return Err((id, ()));
+                        }
+                    };
+
+                    match client.send(msg).await {
+                        Ok(()) => {
+                            rapid_debug!("Broadcast OK → {id}");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            rapid_warn!("Broadcast FAIL → {id}: {e:?}");
+                            Err((id, ()))
+                        }
                     }
                 }
-            }
-        });
+            });
 
-        let results = join_all(tasks).await;
-        
-        let mut errors = Vec::new();
-        for res in results {
-            if let Err((id, e)) = res {
-                self.clients.remove(&id);
-                errors.push(e);
+            // Process this batch
+            let batch_results = join_all(tasks).await;
+
+            // Collect errors from this batch
+            for res in batch_results {
+                if let Err((id, e)) = res {
+                    self.clients.remove(&id);
+                    errors.push(e);
+                }
             }
         }
 
         if !errors.is_empty() {
             rapid_warn!(
-            "Broadcast beendet: {} Fehler / {} verbleibende Clients",
-            errors.len(),
-            self.clients.len()
-        );
-            // Nur Fehler melden, wenn *alle* Send-Ops scheiterten
-            if errors.len() == self.clients.len() {
+                "Broadcast beendet: {} Fehler / {} verbleibende Clients",
+                errors.len(),
+                self.clients.len()
+            );
+            // Only report an error if all send operations failed
+            if errors.len() == client_entries.len() {
                 return Err(ServerError::BroadcastFailed(errors));
             }
         } else {
