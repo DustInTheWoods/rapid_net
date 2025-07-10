@@ -4,12 +4,12 @@ use tokio::net::TcpListener;
 use rapid_net::{config::RapidClientConfig, RapidClient};
 use rapid_tlv::RapidTlvMessage;
 
-/// Dummy-Server: akzeptiert genau **eine** TCP-Verbindung und beendet sich dann.
+/// Dummy server: accepts exactly **one** TCP connection and then terminates.
 async fn spawn_server_on(addr: &str) -> tokio::task::JoinHandle<()> {
-    // bind schlägt fehl → Test panic, gut so
+    // bind failure -> test panic, which is expected
     let listener = TcpListener::bind(addr).await.unwrap();
     tokio::spawn(async move {
-        // ignorieren, ob accept() klappt – der Test erledigt das Abbrechen
+        // ignore whether accept() succeeds - the test handles the termination
         let _ = listener.accept().await;
     })
 }
@@ -33,55 +33,55 @@ async fn message_encode_decode() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 2. Fehler-Handling: ungültiges Paket                                       */
+/* 2. Error Handling: Invalid Packet                                          */
 /* -------------------------------------------------------------------------- */
 #[tokio::test]
 async fn message_parse_error() {
-    // Nur Header (4 Bytes) → Länge = 4, keine Payload → sollte Error liefern
+    // Only header (4 bytes) -> Length = 4, no payload -> should return an error
     let bogus = bytes::Bytes::from_static(&[0, 0, 0, 4]);
     assert!(RapidTlvMessage::parse(bogus).is_err());
 }
 
 /* -------------------------------------------------------------------------- */
-/* 3. Reconnect-Logik                                                         */
+/* 3. Reconnect Logic                                                         */
 /* -------------------------------------------------------------------------- */
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_reconnect() {
-    // 1) freien Port sichern und direkt wieder freigeben
+    // 1) secure a free port and release it immediately
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     drop(listener);
 
     let cfg = RapidClientConfig::new(addr.clone(), true);
 
-    // erster Versuch MUSS scheitern
+    // first attempt MUST fail
     assert!(RapidClient::connect(&cfg).await.is_err());
 
-    // 2) Server exakt auf diesem Port starten
+    // 2) start server on exactly this port
     let srv = spawn_server_on(&addr).await;
 
-    // zweiter Versuch MUSS klappen
+    // second attempt MUST succeed
     let client = RapidClient::connect(&cfg)
         .await
         .expect("reconnect ok");
     assert!(client.is_alive());
 
-    // Dummy-Server beenden, sonst hängt der Test-Runner
+    // terminate dummy server, otherwise the test runner will hang
     srv.abort();
 }
 
 /* -------------------------------------------------------------------------- */
-/* 4. Connection-Timeout                                                      */
+/* 4. Connection Timeout                                                      */
 /* -------------------------------------------------------------------------- */
 #[tokio::test]
 async fn client_connect_timeout() {
-    // 192.0.2.0/24 = TEST-NET-1 → sollte sofort ECONNREFUSED oder Timeout liefern
+    // 192.0.2.0/24 = TEST-NET-1 -> should immediately return ECONNREFUSED or Timeout
     let cfg = RapidClientConfig::new("192.0.2.1:65000".into(), true);
 
     let res = tokio::time::timeout(Duration::from_secs(3), RapidClient::connect(&cfg)).await;
-    // Timeout der Future ODER Result::Err beiderseits sind erlaubt
+    // Both Future timeout OR Result::Err are acceptable
     assert!(
         res.is_err() || res.unwrap().is_err(),
-        "erwarteter Timeout oder Connection Refused"
+        "expected Timeout or Connection Refused"
     );
 }

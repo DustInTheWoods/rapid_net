@@ -4,16 +4,14 @@ use std::fmt;
 use std::error::Error;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 use dashmap::DashMap;
 use rapid_tlv::RapidTlvMessage;
-use crate::client::InboundClient;   // 1. neuer Typ
+use crate::client::InboundClient;
 use crate::config::RapidServerConfig;
 use crate::message::{ClientEvent, ServerEvent};
 use crate::{rapid_debug, rapid_error, rapid_info, rapid_warn};
-use futures::future::join_all;   // im Cargo.toml: futures = "0.3"
-use log;
+use futures::future::join_all;
 
 /// Error types that can occur during server operations
 #[derive(Debug)]
@@ -56,22 +54,13 @@ impl Error for ServerError {}
 pub struct RapidServer {
     cfg: RapidServerConfig,
     clients: DashMap<Uuid, Arc<InboundClient>>,
-    client_task_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl RapidServer {
     pub fn new(cfg: RapidServerConfig) -> Self {
-        // Initialize the semaphore if a thread count is specified for client tasks
-        let client_task_semaphore = cfg.thread_count().map(|count| {
-            // If thread_count is specified, create a semaphore with that many permits
-            // This will limit the number of concurrent client tasks
-            Arc::new(Semaphore::new(count))
-        });
-
         Self {
             cfg,
             clients: DashMap::new(),
-            client_task_semaphore,
         }
     }
 
@@ -81,60 +70,58 @@ impl RapidServer {
 
     fn remove_client(&self, client_id: Uuid) {
         rapid_debug!("Removing client {}", client_id);
-
         self.clients.remove(&client_id);
     }
 
     async fn client_task(self: Arc<Self>, client: Arc<InboundClient>, mut client_rx: Receiver<ClientEvent>, app_tx: Sender<ServerEvent>,) {
         let client_id = client.id();
-        rapid_info!("Handling messages for client {}", client_id);
+        rapid_debug!("Handling messages for client {}", client_id);
 
         // Immediately send a Connected event to the application
         // This ensures the server application knows about the client as soon as possible
-        let connected_event = ServerEvent::Connected { client_id: client.id() };
+        let connected_event = ServerEvent::Connected { client_id };
         if let Err(e) = app_tx.send(connected_event).await {
             rapid_error!("Failed to send initial connected event for client {}: {:?}", client_id, e);
             return;
         }
-        rapid_info!("Sent initial connected event for client {}", client_id);
+        rapid_debug!("Sent initial connected event for client {}", client_id);
 
         while let Some(event) = client_rx.recv().await {
-            rapid_info!("Received event from client {}: {:?}", client_id, std::mem::discriminant(&event));
+            rapid_debug!("Received event from client {}: {:?}", client_id, std::mem::discriminant(&event));
 
             let server_event = match event {
-                ClientEvent::Message { client_id, message } => {
-                    rapid_info!("Received message from client {}", client_id);
+                ClientEvent::Message { client_id: event_client_id, message } => {
+                    rapid_debug!("Received message from client {}", event_client_id);
                     ServerEvent::Message {
-                        client_id: client.id(),
+                        client_id,
                         message,
                     }
                 }
-                ClientEvent::Connected { client_id } => {
-                    rapid_info!("Client {} connected (event from client)", client_id);
+                ClientEvent::Connected { client_id: event_client_id } => {
+                    rapid_debug!("Client {} connected (event from client)", event_client_id);
                     // We already sent a connected event, so we don't need to send another one, 
                     // But we'll log it for debugging purposes
                     continue;
                 }
-                ClientEvent::Disconnected { client_id } => {
-                    rapid_info!("Client {} disconnected", client_id);
-                    ServerEvent::Disconnected { client_id: client.id() }
+                ClientEvent::Disconnected { client_id: event_client_id } => {
+                    rapid_info!("Client {} disconnected", event_client_id);
+                    ServerEvent::Disconnected { client_id }
                 }
-                ClientEvent::Error { client_id, error } => {
-                    rapid_error!("Client {} error: {:?}", client_id, error);
-                    ServerEvent::Error { client_id: client.id(), error }
+                ClientEvent::Error { client_id: event_client_id, error } => {
+                    rapid_error!("Client {} error: {:?}", event_client_id, error);
+                    ServerEvent::Error { client_id, error }
                 }
             };
 
-            rapid_info!("Sending event to application for client {}", client_id);
+            rapid_debug!("Forwarding event to application for client {}", client_id);
             if let Err(e) = app_tx.send(server_event).await {
                 rapid_error!("Failed to forward event from client {}: {:?}", client_id, e);
                 break;
             }
-            rapid_info!("Sent event to application for client {}", client_id);
         }
 
-        rapid_debug!("Client {} disconnected", client_id);
-        app_tx.send(ServerEvent::Disconnected { client_id: client.id() }).await.unwrap();
+        rapid_info!("Client {} disconnected, removing from server", client_id);
+        app_tx.send(ServerEvent::Disconnected { client_id }).await.unwrap();
         self.remove_client(client_id);
     }
 
@@ -147,48 +134,30 @@ impl RapidServer {
         // No need for a buffer as we're processing one connection at a time
 
         loop {
-            // Try to accept multiple connections at once if available
+            // Accept new connections
             match listener.accept().await {
                 Ok((socket, addr)) => {
-                    rapid_debug!("Accepted connection from {}", addr);
+                    rapid_info!("Accepted connection from {}", addr);
 
                     // Set TCP_NODELAY for better performance
                     if let Err(e) = socket.set_nodelay(true) {
-                        rapid_warn!("Failed to set TCP_NODELAY: {:?}", e);
+                        rapid_warn!("Failed to set TCP_NODELAY for {}: {:?}", addr, e);
                     }
 
                     // Create a channel with appropriate capacity (100 is usually enough)
                     let (client_tx, client_rx) = tokio::sync::mpsc::channel::<ClientEvent>(100);
-                    let client = Arc::new(InboundClient::from_stream(socket, addr, client_tx, self.cfg.thread_count()));
+                    let client = Arc::new(InboundClient::from_stream(socket, addr, client_tx));
 
                     self.add_client(Arc::clone(&client));
+                    rapid_debug!("Added client {} to server", client.id());
 
                     let server = Arc::clone(&self);
                     let app_tx = tx.clone();
 
-                    // Check if we need to limit the number of concurrent client tasks
-                    if let Some(semaphore) = &self.client_task_semaphore {
-                        // Clone the semaphore for use in the task
-                        let semaphore = Arc::clone(semaphore);
-
-                        // Spawn the client task with semaphore-based concurrency control
-                        tokio::spawn(async move {
-                            // Acquire a permit from the semaphore
-                            // This will block if all permits are in use, effectively limiting concurrency
-                            let permit = semaphore.acquire().await.unwrap();
-
-                            // Run the client task
-                            server.client_task(client, client_rx, app_tx).await;
-
-                            // The permit is automatically released when dropped at the end of this scope
-                            drop(permit);
-                        });
-                    } else {
-                        // No concurrency limit - spawn the client task directly
-                        tokio::spawn(async move {
-                            server.client_task(client, client_rx, app_tx).await;
-                        });
-                    }
+                    // Spawn the client task directly
+                    tokio::spawn(async move {
+                        server.client_task(client, client_rx, app_tx).await;
+                    });
                 }
                 Err(e) => {
                     rapid_error!("Error accepting connection: {:?}", e);
@@ -198,12 +167,11 @@ impl RapidServer {
     }
 
     pub async fn send_to_client(&self, client_id: &Uuid, msg: RapidTlvMessage) -> Result<(), ServerError> {
-        rapid_info!("Server sending message to client {}", client_id);
+        rapid_debug!("Sending message to client {}", client_id);
         if let Some(client) = self.clients.get(client_id) {
-            rapid_info!("Found client {} in server's client list", client_id);
             match client.send(msg).await {
                 Ok(()) => {
-                    rapid_info!("Sent message to client {}", client_id);
+                    rapid_debug!("Successfully sent message to client {}", client_id);
                     Ok(())
                 },
                 Err(e) => {
@@ -212,7 +180,7 @@ impl RapidServer {
                 }
             }
         } else {
-            rapid_error!("Failed to find client {} in server's client list", client_id);
+            rapid_warn!("Client {} not found in server's client list", client_id);
             Err(ServerError::ClientNotFound(*client_id))
         }
     }
@@ -232,8 +200,8 @@ impl RapidServer {
             .map(|e| (*e.key(), e.value().clone()))
             .collect();
 
-        rapid_debug!(
-            "Broadcast start – type 0x{:02X}, size {} B → {} Clients ({} excluded)",
+        rapid_info!(
+            "Broadcasting message type 0x{:02X}, size {} bytes to {} clients ({} excluded)",
             msg.event_type,
             encoded.len(),
             client_entries.len(),
@@ -256,18 +224,18 @@ impl RapidServer {
                     let msg = match RapidTlvMessage::parse(bytes::Bytes::from(encoded_bytes)) {
                         Ok(m) => m,
                         Err(_) => {
-                            rapid_error!("Broadcast: Re-parse für {id} fehlgeschlagen");
+                            rapid_error!("Broadcast: Re-parse failed for client {id}");
                             return Err((id, ()));
                         }
                     };
 
                     match client.send(msg).await {
                         Ok(()) => {
-                            rapid_debug!("Broadcast OK → {id}");
+                            rapid_debug!("Broadcast successful to client {id}");
                             Ok(())
                         }
                         Err(e) => {
-                            rapid_warn!("Broadcast FAIL → {id}: {e:?}");
+                            rapid_warn!("Broadcast failed to client {id}: {e:?}");
                             Err((id, ()))
                         }
                     }
@@ -288,7 +256,7 @@ impl RapidServer {
 
         if !errors.is_empty() {
             rapid_warn!(
-                "Broadcast beendet: {} Fehler / {} verbleibende Clients",
+                "Broadcast completed with {} errors, {} remaining clients",
                 errors.len(),
                 self.clients.len()
             );
@@ -297,7 +265,7 @@ impl RapidServer {
                 return Err(ServerError::BroadcastFailed(errors));
             }
         } else {
-            rapid_info!("Broadcast erfolgreich → {} Clients", self.clients.len());
+            rapid_info!("Broadcast successfully completed to {} clients", self.clients.len());
         }
 
         Ok(())

@@ -5,41 +5,41 @@ use uuid::Uuid;
 use thiserror::Error;
 use rapid_tlv::RapidTlvError;
 
-/// Sammel-Fehlertyp für alles, was auf Client-Seite schiefgehen kann.
+/// Collective error type for everything that can go wrong on the client side.
 #[derive(Debug, Error)]
 pub enum ClientError {
     /* ───────────── Transport / Socket ───────────── */
-    #[error("Verbindung unerwartet geschlossen")]
+    #[error("Connection unexpectedly closed")]
     ConnectionClosed,
 
-    #[error("I/O-Fehler: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("Timeout beim Lesen des Sockets")]
+    #[error("Timeout reading from socket")]
     ReadTimeout,
 
-    #[error("Timeout beim Schreiben des Sockets")]
+    #[error("Timeout writing to socket")]
     WriteTimeout,
 
-    #[error("Timeout beim Flush")]
+    #[error("Timeout during flush")]
     FlushTimeout,
 
-    /* ───────────── Protokoll / Codec ───────────── */
-    #[error("Rapid-TLV-Fehler: {0:?}")]
+    /* ───────────── Protocol / Codec ───────────── */
+    #[error("Rapid-TLV error: {0:?}")]
     Codec(RapidTlvError),
 
-    #[error("Nachricht zu groß ({0} B)")]
+    #[error("Message too large ({0} bytes)")]
     MessageTooLarge(usize),
 
     /* ───────────── Channel / Task ───────────── */
-    #[error("MPSC-Kanal zu Schreib-Task ist geschlossen")]
+    #[error("MPSC channel to write task is closed")]
     ChannelClosed,
 
-    #[error("Timeout beim Senden in Schreib-Kanal")]
+    #[error("Timeout sending to write channel")]
     ChannelSendTimeout,
 
-    /* ───────────── Anwendungsebene ───────────── */
-    #[error("Peer {0} meldet Fehler: {1}")]
+    /* ───────────── Application Level ───────────── */
+    #[error("Peer {0} reports error: {1}")]
     RemoteError(Uuid, String),
 }
 
