@@ -45,7 +45,7 @@ impl OutboundClient {
             SocketType::Unix => {
                 #[cfg(unix)]
                 {
-                    let path = cfg.address();
+                    let path = cfg.unix_path().unwrap_or_else(|| cfg.address());
                     let stream = UnixStream::connect(path).await?;
 
                     // Read loop should run -> Some(app_tx)
@@ -58,7 +58,8 @@ impl OutboundClient {
                 {
                     return Err(io::Error::new(
                         ErrorKind::Unsupported,
-                        format!("Unix sockets are not supported on this platform: {}", cfg.address())
+                        format!("Unix sockets are not supported on this platform: {}", 
+                            cfg.unix_path().unwrap_or_else(|| cfg.address()))
                     ));
                 }
             }

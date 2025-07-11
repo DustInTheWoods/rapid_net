@@ -145,7 +145,9 @@ impl RapidServer {
                 #[cfg(unix)]
                 {
                     let self_clone = Arc::clone(&self);
-                    self_clone.run_unix(addr, tx).await;
+                    let unix_path = self.cfg.unix_path().unwrap_or(addr);
+                    rapid_info!("Using Unix socket path: {}", unix_path);
+                    self_clone.run_unix(unix_path, tx).await;
                 }
                 #[cfg(not(unix))]
                 {

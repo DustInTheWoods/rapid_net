@@ -17,15 +17,23 @@ pub struct RapidServerConfig {
     pub no_delay: bool,
     pub address: String,
     pub socket_type: SocketType,
+    pub unix_path: Option<String>,
 }
 
 impl RapidServerConfig {
-    pub fn new(address: String, no_delay: bool, socket_type: Option<SocketType>) -> Self {
+    // New constructor with unix_path parameter
+    pub fn new_with_unix_path(address: String, no_delay: bool, socket_type: Option<SocketType>, unix_path: Option<String>) -> Self {
         Self { 
             no_delay, 
             address, 
-            socket_type: socket_type.unwrap_or_default() 
+            socket_type: socket_type.unwrap_or_default(),
+            unix_path
         }
+    }
+
+    // Backward compatible constructor
+    pub fn new(address: String, no_delay: bool, socket_type: Option<SocketType>) -> Self {
+        Self::new_with_unix_path(address, no_delay, socket_type, None)
     }
 
     pub fn address(&self) -> &str {
@@ -38,6 +46,10 @@ impl RapidServerConfig {
 
     pub fn socket_type(&self) -> &SocketType {
         &self.socket_type
+    }
+
+    pub fn unix_path(&self) -> Option<&str> {
+        self.unix_path.as_deref()
     }
 }
 
@@ -47,15 +59,23 @@ pub struct RapidClientConfig {
     pub no_delay: bool,
     pub address: String,
     pub socket_type: SocketType,
+    pub unix_path: Option<String>,
 }
 
 impl RapidClientConfig {
-    pub fn new(address: String, no_delay: bool, socket_type: Option<SocketType>) -> Self {
+    // New constructor with unix_path parameter
+    pub fn new_with_unix_path(address: String, no_delay: bool, socket_type: Option<SocketType>, unix_path: Option<String>) -> Self {
         Self { 
             no_delay, 
             address, 
-            socket_type: socket_type.unwrap_or_default() 
+            socket_type: socket_type.unwrap_or_default(),
+            unix_path
         }
+    }
+
+    // Backward compatible constructor
+    pub fn new(address: String, no_delay: bool, socket_type: Option<SocketType>) -> Self {
+        Self::new_with_unix_path(address, no_delay, socket_type, None)
     }
 
     pub fn address(&self) -> &str {
@@ -68,5 +88,9 @@ impl RapidClientConfig {
 
     pub fn socket_type(&self) -> &SocketType {
         &self.socket_type
+    }
+
+    pub fn unix_path(&self) -> Option<&str> {
+        self.unix_path.as_deref()
     }
 }

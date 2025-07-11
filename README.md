@@ -144,11 +144,17 @@ Unix sockets provide faster communication on the same machine. To configure a Un
 
 1. Import the necessary types: `RapidServerConfig`, `RapidClientConfig`, and `SocketType` from `rapid_net::config`.
 2. Create a server configuration with Unix socket by calling `RapidServerConfig::new()` with:
-   - The socket path as a string (e.g., "/tmp/rapid_net.sock")
+   - The address as a string (e.g., "127.0.0.1:9000") - this is still required but can be any value when using Unix sockets
    - The no_delay flag (true/false)
    - The socket type as `Some(SocketType::Unix)`
 
-3. Create a client configuration with Unix socket similarly using `RapidClientConfig::new()`.
+   Alternatively, you can use `RapidServerConfig::new_with_unix_path()` to explicitly specify the Unix socket path:
+   - The address as a string (still required for backward compatibility)
+   - The no_delay flag (true/false)
+   - The socket type as `Some(SocketType::Unix)`
+   - The Unix socket path as `Some("/tmp/rapid_net.sock")`
+
+3. Create a client configuration with Unix socket similarly using `RapidClientConfig::new()` or `RapidClientConfig::new_with_unix_path()`.
 
 Note: Unix sockets are only available on Unix-like operating systems (Linux, macOS, etc.) and not on Windows.
 
@@ -156,15 +162,17 @@ Note: Unix sockets are only available on Unix-like operating systems (Linux, mac
 
 ### RapidServerConfig
 
-- `address`: The address to bind to (IP:port for TCP, file path for Unix socket)
+- `address`: The address to bind to (IP:port for TCP)
 - `no_delay`: Whether to enable TCP_NODELAY (reduces latency but may increase bandwidth usage)
 - `socket_type`: The type of socket to use (TCP or Unix)
+- `unix_path`: Optional path for Unix socket (if not specified, `address` will be used as the Unix socket path)
 
 ### RapidClientConfig
 
-- `address`: The address to connect to (IP:port for TCP, file path for Unix socket)
+- `address`: The address to connect to (IP:port for TCP)
 - `no_delay`: Whether to enable TCP_NODELAY (reduces latency but may increase bandwidth usage)
 - `socket_type`: The type of socket to use (TCP or Unix)
+- `unix_path`: Optional path for Unix socket (if not specified, `address` will be used as the Unix socket path)
 
 ## Usage Patterns
 
@@ -193,14 +201,20 @@ To set up basic server-client communication:
 For faster local communication on Unix-like systems:
 
 1. **Server Setup with Unix Socket**:
-   - Create a server configuration with Unix socket type
-   - Specify a file path for the socket (e.g., "/tmp/rapid_net.sock")
-   - Set the socket type to `SocketType::Unix`
+   - Create a server configuration with Unix socket type using one of these methods:
+     - Use `RapidServerConfig::new()` with an address, no_delay, and `SocketType::Unix` (the address will be used as the Unix socket path)
+     - Use `RapidServerConfig::new_with_unix_path()` to explicitly specify the Unix socket path as a separate parameter
 
 2. **Client Setup with Unix Socket**:
-   - Create a client configuration with the same socket path
+   - Create a client configuration with the same socket path using one of the methods above
    - Set the socket type to `SocketType::Unix`
    - Connect and use the client as with TCP sockets
+
+3. **Specifying a Custom Unix Socket Path**:
+   - When using `SocketType::Unix`, you can now specify a custom path for the Unix socket file
+   - If you use the standard `new()` constructor, the `address` field will be used as the Unix socket path
+   - If you want to specify a different path, use the `new_with_unix_path()` constructor and provide the path in the `unix_path` parameter
+   - This allows you to keep a standard address format for TCP connections while using a custom path for Unix sockets
 
 ### Handling Server Events
 

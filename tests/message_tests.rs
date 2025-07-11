@@ -1,8 +1,7 @@
+use bytes::Bytes;
 use rapid_net::message::ClientEvent;
 use rapid_tlv::RapidTlvMessage;
-use bytes::Bytes;
 use uuid::Uuid;
-use std::net::SocketAddr;
 
 pub const MSG_EVENT: u8 = 0x01;
 pub const MSG_CONNECTED: u8 = 0x02;
