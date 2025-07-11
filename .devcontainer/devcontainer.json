@@ -1,7 +1,21 @@
 {
-    "name": "Rapid Net Development",
-    "dockerFile": "../Dockerfile",
-    "workspaceFolder": "/app",
+    "name": "RapidNet Development",
+    "dockerFile": "Dockerfile",
+    "context": "..",
+
+    // Mount the project root to /workspace in the container
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "workspaceFolder": "/workspace",
+
+    // Forward ports for the server
+    "forwardPorts": [8888],
+
+    // Set environment variables
+    "remoteEnv": {
+        "RUST_BACKTRACE": "1"
+    },
+
+    // Install VS Code extensions
     "customizations": {
         "vscode": {
             "extensions": [
@@ -16,9 +30,10 @@
             }
         }
     },
-    "mounts": [
-        "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached"
-    ],
-    "remoteUser": "rusty",
-    "postCreateCommand": "rustup component add clippy rustfmt"
+
+    // Rust components are now installed in the Dockerfile
+    // "postCreateCommand": "rustup target add x86_64-unknown-linux-gnu && rustup component add clippy rustfmt",
+
+    // Connect as the vscode user
+    "remoteUser": "vscode"
 }
