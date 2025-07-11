@@ -492,9 +492,10 @@ dependencies = [
 [[package]]
 name = "rapid_tlv"
 version = "0.1.1"
-source = "git+https://github.com/DustInTheWoods/rapid_tlv#cb7dac0433cdfd8b9ae64be64b980cbfdeda57f1"
+source = "git+https://github.com/DustInTheWoods/rapid_tlv#2fc8b68fc001a34908312e134013fa92ff4aa29e"
 dependencies = [
  "bytes",
+ "log",
 ]
 
 [[package]]
