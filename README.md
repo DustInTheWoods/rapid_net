@@ -2,7 +2,6 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rapid_net.svg)](https://crates.io/crates/rapid_net)
 [![Documentation](https://docs.rs/rapid_net/badge.svg)](https://docs.rs/rapid_net)
-[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/rapid_net.svg)](LICENSE)
 
 A high-performance, asynchronous networking library for Rust, built on top of Tokio. It provides a simple API for building client-server applications with TLV (Type-Length-Value) message encoding.
 
@@ -350,7 +349,6 @@ For more details, see the [.devcontainer/README.md](.devcontainer/README.md) fil
 This project is licensed under either of:
 
 - [MIT License](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
 
 at your option.
 
