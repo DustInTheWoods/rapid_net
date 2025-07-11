@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use rapid_net::message::ClientEvent;
-use rapid_tlv::{RapidTlvMessage, RapidTlvEventType, RapidTlvFieldType};
+use rapid_tlv::RapidTlvMessage;
 use bytes::Bytes;
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};

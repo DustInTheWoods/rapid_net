@@ -9,6 +9,7 @@ A high-performance, asynchronous networking library for Rust, built on top of To
 ## Features
 
 - Asynchronous client and server implementations
+- Support for both TCP and Unix socket connections
 - TLV message encoding for efficient binary communication
 - Event-based architecture for handling connections, messages, and errors
 - Automatic reconnection handling
@@ -48,7 +49,7 @@ async fn main() {
     let addr = "127.0.0.1:9000".to_string();
 
     // Start server
-    let server_cfg = RapidServerConfig::new(addr.clone(), true);
+    let server_cfg = RapidServerConfig::new(addr.clone(), true, None); // Using TCP by default
     let (server_tx, mut server_rx) = mpsc::channel::<ServerEvent>(100);
     let server = Arc::new(RapidServer::new(server_cfg));
 
@@ -67,7 +68,7 @@ async fn main() {
         let (client_tx, mut client_rx) = mpsc::channel::<ClientEvent>(100);
 
         // 2. Configure and connect client
-        let client_cfg = RapidClientConfig::new(addr.clone(), true);
+        let client_cfg = RapidClientConfig::new(addr.clone(), true, None); // Using TCP by default
         let client = RapidClient::new(client_cfg, client_tx).await.expect("Client connect failed");
 
         println!("Client {} connected to {}", client.id(), client.addr());
@@ -121,6 +122,99 @@ async fn main() {
 }
 ```
 
+## Socket Type Configuration
+
+RapidNet supports both TCP and Unix socket connections. You can configure the socket type when creating the server or client configuration.
+
+### TCP Socket (Default)
+
+TCP sockets are the default and work across network boundaries. To configure a TCP socket:
+
+1. Import the necessary types: `RapidServerConfig`, `RapidClientConfig`, and `SocketType` from `rapid_net::config`.
+2. Create a server configuration with TCP socket by calling `RapidServerConfig::new()` with:
+   - The address as a string (e.g., "127.0.0.1:9000")
+   - The no_delay flag (true/false)
+   - The socket type as `Some(SocketType::Tcp)` or `None` for default TCP
+
+3. Create a client configuration with TCP socket similarly using `RapidClientConfig::new()`.
+
+### Unix Socket
+
+Unix sockets provide faster communication on the same machine. To configure a Unix socket:
+
+1. Import the necessary types: `RapidServerConfig`, `RapidClientConfig`, and `SocketType` from `rapid_net::config`.
+2. Create a server configuration with Unix socket by calling `RapidServerConfig::new()` with:
+   - The socket path as a string (e.g., "/tmp/rapid_net.sock")
+   - The no_delay flag (true/false)
+   - The socket type as `Some(SocketType::Unix)`
+
+3. Create a client configuration with Unix socket similarly using `RapidClientConfig::new()`.
+
+Note: Unix sockets are only available on Unix-like operating systems (Linux, macOS, etc.) and not on Windows.
+
+## Configuration Options
+
+### RapidServerConfig
+
+- `address`: The address to bind to (IP:port for TCP, file path for Unix socket)
+- `no_delay`: Whether to enable TCP_NODELAY (reduces latency but may increase bandwidth usage)
+- `socket_type`: The type of socket to use (TCP or Unix)
+
+### RapidClientConfig
+
+- `address`: The address to connect to (IP:port for TCP, file path for Unix socket)
+- `no_delay`: Whether to enable TCP_NODELAY (reduces latency but may increase bandwidth usage)
+- `socket_type`: The type of socket to use (TCP or Unix)
+
+## Usage Patterns
+
+### Basic Server-Client Communication
+
+To set up basic server-client communication:
+
+1. **Server Setup**:
+   - Create a server configuration with `RapidServerConfig::new()`
+   - Create a channel for server events with `mpsc::channel::<ServerEvent>()`
+   - Create a server instance with `RapidServer::new()`
+   - Run the server in a separate task with `server.run(server_tx).await`
+
+2. **Client Setup**:
+   - Create a client configuration with `RapidClientConfig::new()`
+   - Connect the client with `RapidClient::connect()`
+   - Send messages with `client.send_message()`
+
+3. **Message Handling**:
+   - Create messages with `RapidTlvMessage::new()`
+   - Add fields with `msg.add_field()`
+   - Parse received messages by accessing fields with `message.get_field()`
+
+### Using Unix Sockets
+
+For faster local communication on Unix-like systems:
+
+1. **Server Setup with Unix Socket**:
+   - Create a server configuration with Unix socket type
+   - Specify a file path for the socket (e.g., "/tmp/rapid_net.sock")
+   - Set the socket type to `SocketType::Unix`
+
+2. **Client Setup with Unix Socket**:
+   - Create a client configuration with the same socket path
+   - Set the socket type to `SocketType::Unix`
+   - Connect and use the client as with TCP sockets
+
+### Handling Server Events
+
+Process server events in a loop:
+
+1. Receive events with `server_rx.recv().await`
+2. Match on event types:
+   - `ServerEvent::Connected`: Handle new client connections
+   - `ServerEvent::Message`: Process incoming messages
+   - `ServerEvent::Disconnected`: Handle client disconnections
+   - `ServerEvent::Error`: Handle client errors
+
+3. Send responses to clients with `server.send_to_client()`
+
 ## Documentation
 
 For more detailed documentation, please see the [API documentation](https://docs.rs/rapid_net).
@@ -129,17 +223,113 @@ For more detailed documentation, please see the [API documentation](https://docs
 
 RapidNet uses an event-based architecture:
 
-1. **Server**: Listens for incoming connections and spawns a task for each client
-2. **Client**: Connects to a server and provides methods for sending messages
-3. **Events**: Both client and server communicate via event channels
-4. **Messages**: Uses the TLV (Type-Length-Value) format for efficient binary communication
+1. **Server**: Listens for incoming connections (TCP or Unix socket) and spawns a task for each client
+2. **Client**: Connects to a server (TCP or Unix socket) and provides methods for sending messages
+3. **Configuration**: Allows selecting between TCP and Unix socket connections
+4. **Events**: Both client and server communicate via event channels
+5. **Messages**: Uses the TLV (Type-Length-Value) format for efficient binary communication
 
 ## Performance Considerations
 
 - The library uses Tokio's asynchronous I/O for high performance
 - TCP_NODELAY is enabled by default for lower latency
+- Unix sockets provide faster communication for local processes
 - Message batching is implemented for higher throughput
 - Buffer reuse minimizes memory allocations
+- Large messages are automatically chunked to prevent stack overflow
+
+## Testing Unix Sockets on Windows
+
+Since Unix sockets are not natively supported on Windows, we provide a Docker-based solution for testing Unix socket functionality on Windows systems:
+
+### Prerequisites
+
+- [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/) (or Docker for Linux/macOS)
+- Git (to clone the repository)
+
+### Verifying Docker Setup
+
+Before running the tests, you can verify that your Docker setup is working correctly:
+
+**Windows:**
+```
+.\test_docker_setup.bat
+```
+
+**Linux/macOS:**
+```
+chmod +x test_docker_setup.sh
+./test_docker_setup.sh
+```
+
+### Running Unix Socket Tests
+
+1. Clone the repository:
+   ```
+   git clone https://github.com/yourusername/rapid_net.git
+   cd rapid_net
+   ```
+
+2. Run the tests using the provided script:
+
+   **Windows:**
+   ```
+   .\run_unix_tests.bat
+   ```
+
+   **Linux/macOS:**
+   ```
+   chmod +x run_unix_tests.sh
+   ./run_unix_tests.sh
+   ```
+
+   Or, if you prefer to use Docker Compose directly:
+   ```
+   docker-compose up --build
+   ```
+
+### What the Docker Setup Does
+
+The Docker setup:
+
+1. Creates a Linux environment with Rust installed
+2. Mounts your project directory into the container
+3. Runs the Unix socket tests in the Linux environment
+4. Displays the test results
+
+### Test Results
+
+The tests will verify:
+
+1. Basic Unix socket server initialization
+2. Client-server communication over Unix sockets
+3. Multiple client connections using Unix sockets
+4. Performance comparison between Unix sockets and TCP sockets
+
+The performance comparison test will show how much faster Unix sockets are compared to TCP sockets for local communication, which can be significant for high-throughput applications.
+
+## Development Container
+
+For a consistent development environment, this project includes a Visual Studio Code Dev Container configuration. This allows you to develop inside a Docker container with all the necessary tools and extensions pre-configured.
+
+### Prerequisites
+
+1. [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+2. [Visual Studio Code](https://code.visualstudio.com/) installed
+3. [Remote - Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) installed in VS Code
+
+### Getting Started with Dev Container
+
+1. Open this repository in Visual Studio Code
+2. When prompted, click "Reopen in Container" or run the "Remote-Containers: Reopen in Container" command from the command palette
+3. VS Code will build the container and connect to it, which may take a few minutes the first time
+4. Once connected, you'll have a full Rust development environment with:
+   - Rust Analyzer for code intelligence
+   - Debugging support via LLDB
+   - Cargo integration
+   - Code formatting and linting tools
+
+For more details, see the [.devcontainer/README.md](.devcontainer/README.md) file.
 
 ## License
 

@@ -2,13 +2,19 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::fmt;
 use std::error::Error;
+#[cfg(unix)]
+use std::path::Path;
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(unix)]
+use tokio::net::unix::SocketAddr as UnixSocketAddr;
 use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
 use dashmap::DashMap;
 use rapid_tlv::RapidTlvMessage;
 use crate::client::InboundClient;
-use crate::config::RapidServerConfig;
+use crate::config::{RapidServerConfig, SocketType};
 use crate::message::{ClientEvent, ServerEvent};
 use crate::{rapid_debug, rapid_error, rapid_info, rapid_warn};
 use futures::future::join_all;
@@ -127,8 +133,30 @@ impl RapidServer {
 
     pub async fn run(self: Arc<Self>, tx: Sender<ServerEvent>) {
         let addr = self.cfg.address();
-        rapid_info!("Starting server on {}", addr);
+        let socket_type = self.cfg.socket_type();
+        rapid_info!("Starting server on {} using {:?}", addr, socket_type);
 
+        match socket_type {
+            SocketType::Tcp => {
+                let self_clone = Arc::clone(&self);
+                self_clone.run_tcp(addr, tx).await;
+            },
+            SocketType::Unix => {
+                #[cfg(unix)]
+                {
+                    let self_clone = Arc::clone(&self);
+                    self_clone.run_unix(addr, tx).await;
+                }
+                #[cfg(not(unix))]
+                {
+                    rapid_error!("Unix sockets are not supported on this platform");
+                    panic!("Unix sockets are not supported on this platform");
+                }
+            }
+        }
+    }
+
+    async fn run_tcp(self: Arc<Self>, addr: &str, tx: Sender<ServerEvent>) {
         let listener = TcpListener::bind(addr).await.expect("Failed to bind TCP listener");
 
         // No need for a buffer as we're processing one connection at a time
@@ -137,16 +165,16 @@ impl RapidServer {
             // Accept new connections
             match listener.accept().await {
                 Ok((socket, addr)) => {
-                    rapid_info!("Accepted connection from {}", addr);
+                    rapid_info!("Accepted TCP connection from {}", addr);
 
                     // Set TCP_NODELAY for better performance
-                    if let Err(e) = socket.set_nodelay(true) {
+                    if let Err(e) = socket.set_nodelay(self.cfg.no_delay()) {
                         rapid_warn!("Failed to set TCP_NODELAY for {}: {:?}", addr, e);
                     }
 
                     // Create a channel with appropriate capacity (100 is usually enough)
                     let (client_tx, client_rx) = tokio::sync::mpsc::channel::<ClientEvent>(100);
-                    let client = Arc::new(InboundClient::from_stream(socket, addr, client_tx));
+                    let client = Arc::new(InboundClient::from_tcp_stream(socket, addr, client_tx));
 
                     self.add_client(Arc::clone(&client));
                     rapid_debug!("Added client {} to server", client.id());
@@ -160,10 +188,62 @@ impl RapidServer {
                     });
                 }
                 Err(e) => {
-                    rapid_error!("Error accepting connection: {:?}", e);
+                    rapid_error!("Error accepting TCP connection: {:?}", e);
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    async fn run_unix(self: Arc<Self>, addr: &str, tx: Sender<ServerEvent>) {
+        // Make sure the path exists and is accessible
+        if let Some(parent) = Path::new(addr).parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).expect("Failed to create directory for Unix socket");
+            }
+        }
+
+        // Remove the socket file if it already exists
+        if Path::new(addr).exists() {
+            std::fs::remove_file(addr).expect("Failed to remove existing Unix socket");
+        }
+
+        let listener = UnixListener::bind(addr).expect("Failed to bind Unix listener");
+
+        loop {
+            // Accept new connections
+            match listener.accept().await {
+                Ok((socket, _)) => {
+                    rapid_info!("Accepted Unix socket connection");
+
+                    // Create a channel with appropriate capacity (100 is usually enough)
+                    let (client_tx, client_rx) = tokio::sync::mpsc::channel::<ClientEvent>(100);
+                    let client = Arc::new(InboundClient::from_unix_stream(socket, addr.to_string(), client_tx));
+
+                    self.add_client(Arc::clone(&client));
+                    rapid_debug!("Added client {} to server", client.id());
+
+                    let server = Arc::clone(&self);
+                    let app_tx = tx.clone();
+
+                    // Spawn the client task directly
+                    tokio::spawn(async move {
+                        server.client_task(client, client_rx, app_tx).await;
+                    });
+                }
+                Err(e) => {
+                    rapid_error!("Error accepting Unix socket connection: {:?}", e);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn run_unix(self: Arc<Self>, _addr: &str, _tx: Sender<ServerEvent>) {
+        // This method is only a stub for non-Unix platforms
+        // The actual implementation is conditionally compiled for Unix platforms only
+        unreachable!("Unix sockets are not supported on this platform");
     }
 
     pub async fn send_to_client(&self, client_id: &Uuid, msg: RapidTlvMessage) -> Result<(), ServerError> {

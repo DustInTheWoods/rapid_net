@@ -12,7 +12,7 @@ pub const MSG_EVENT: u8 = 0x01;
 async fn test_server_initialization() {
     // Create a server configuration with a random port
     let addr = "127.0.0.1:0".to_string();
-    let cfg = RapidServerConfig::new(addr, true);
+    let cfg = RapidServerConfig::new(addr, true, None);
 
     // Create a server instance
     let server = RapidServer::new(cfg);
@@ -37,7 +37,7 @@ async fn test_server_client_management() {
     // For simplicity, we'll just test the public API
 
     let addr = "127.0.0.1:0".to_string();
-    let cfg = RapidServerConfig::new(addr, true);
+    let cfg = RapidServerConfig::new(addr, true, None);
     let server = Arc::new(RapidServer::new(cfg));
 
     // Create a channel for server events
@@ -72,7 +72,7 @@ async fn test_broadcast_stack_overflow() {
 
     // Create a server configuration
     let addr = "127.0.0.1:0".to_string();
-    let cfg = RapidServerConfig::new(addr, true);
+    let cfg = RapidServerConfig::new(addr, true, None);
     let server = Arc::new(RapidServer::new(cfg));
 
     // Create a channel for server events

@@ -2,15 +2,19 @@ use super::*;
 use crate::{rapid_debug, rapid_info, rapid_warn, ClientEvent, RapidClientConfig};
 use rapid_tlv::RapidTlvMessage;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io;
 use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::sleep;
 use uuid::Uuid;
 use crate::client::error::ClientError;
+use crate::config::SocketType;
+#[cfg(unix)]
+use std::path::Path;
 
 pub struct OutboundClient {
     core: io_core::IoCore,
@@ -20,26 +24,50 @@ pub struct OutboundClient {
 
 impl OutboundClient {
     pub async fn connect(cfg: &RapidClientConfig) -> io::Result<Self> {
-        let addr: SocketAddr = cfg
-            .address()
-            .parse()
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
-
-        let stream = TcpStream::connect(addr).await?;
-        stream.set_nodelay(cfg.no_delay()).ok();
-
         // Channel for incoming events
         let (app_tx, app_rx) = mpsc::channel::<ClientEvent>(100);
 
-        // Read loop should run -> Some(app_tx)
-        let core = io_core::IoCore::new(stream, addr, Some(app_tx));
+        match cfg.socket_type() {
+            SocketType::Tcp => {
+                let addr: std::net::SocketAddr = cfg
+                    .address()
+                    .parse()
+                    .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
 
-        Ok(Self { core, recv_rx: app_rx, cfg: cfg.clone() })
+                let stream = TcpStream::connect(addr).await?;
+                stream.set_nodelay(cfg.no_delay()).ok();
+
+                // Read loop should run -> Some(app_tx)
+                let core = io_core::IoCore::new_tcp(stream, addr, Some(app_tx));
+
+                Ok(Self { core, recv_rx: app_rx, cfg: cfg.clone() })
+            },
+            SocketType::Unix => {
+                #[cfg(unix)]
+                {
+                    let path = cfg.address();
+                    let stream = UnixStream::connect(path).await?;
+
+                    // Read loop should run -> Some(app_tx)
+                    let core = io_core::IoCore::new_unix(stream, path.to_string(), Some(app_tx));
+
+                    return Ok(Self { core, recv_rx: app_rx, cfg: cfg.clone() });
+                }
+
+                #[cfg(not(unix))]
+                {
+                    return Err(io::Error::new(
+                        ErrorKind::Unsupported,
+                        format!("Unix sockets are not supported on this platform: {}", cfg.address())
+                    ));
+                }
+            }
+        }
     }
 
-    #[inline] pub fn id(&self) -> Uuid            { self.core.id }
-    #[inline] pub fn addr(&self) -> SocketAddr    { self.core.addr }
-    #[inline] pub fn is_alive(&self) -> bool      { self.core.is_alive() }
+    #[inline] pub fn id(&self) -> Uuid                { self.core.id }
+    #[inline] pub fn addr(&self) -> io_core::SocketAddr { self.core.addr.clone() }
+    #[inline] pub fn is_alive(&self) -> bool            { self.core.is_alive() }
 
     pub async fn send(&self, msg: RapidTlvMessage) -> Result<(), ClientError> {
         rapid_debug!("Sending: {:?}", msg.event_type);

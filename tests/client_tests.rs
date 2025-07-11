@@ -52,7 +52,7 @@ async fn client_reconnect() {
     let addr = listener.local_addr().unwrap().to_string();
     drop(listener);
 
-    let cfg = RapidClientConfig::new(addr.clone(), true);
+    let cfg = RapidClientConfig::new(addr.clone(), true, None);
 
     // first attempt MUST fail
     assert!(RapidClient::connect(&cfg).await.is_err());
@@ -76,7 +76,7 @@ async fn client_reconnect() {
 #[tokio::test]
 async fn client_connect_timeout() {
     // 192.0.2.0/24 = TEST-NET-1 -> should immediately return ECONNREFUSED or Timeout
-    let cfg = RapidClientConfig::new("192.0.2.1:65000".into(), true);
+    let cfg = RapidClientConfig::new("192.0.2.1:65000".into(), true, None);
 
     let res = tokio::time::timeout(Duration::from_secs(3), RapidClient::connect(&cfg)).await;
     // Both Future timeout OR Result::Err are acceptable

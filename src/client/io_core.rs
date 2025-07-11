@@ -1,16 +1,108 @@
 use crate::{rapid_debug, rapid_error, rapid_warn, ClientEvent};
 use bytes::BytesMut;
 use rapid_tlv::RapidTlvMessage;
-use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::net::SocketAddr as StdSocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use tokio::{
-    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
-    sync::mpsc::{Receiver, Sender},
-};
+use tokio::net::tcp::{OwnedReadHalf as TcpReadHalf, OwnedWriteHalf as TcpWriteHalf};
+#[cfg(unix)]
+use tokio::net::unix::{OwnedReadHalf as UnixReadHalf, OwnedWriteHalf as UnixWriteHalf};
+use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
 use crate::client::error::ClientError;
+#[cfg(unix)]
+use std::path::Path;
+
+// Enum to represent different types of socket addresses
+#[derive(Clone, Debug)]
+pub enum SocketAddr {
+    Tcp(StdSocketAddr),
+    #[cfg(unix)]
+    Unix(String),
+    #[cfg(not(unix))]
+    UnixUnsupported(String), // Placeholder for non-Unix platforms
+}
+
+impl std::fmt::Display for SocketAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SocketAddr::Tcp(addr) => write!(f, "{}", addr),
+            #[cfg(unix)]
+            SocketAddr::Unix(path) => write!(f, "unix:{}", path),
+            #[cfg(not(unix))]
+            SocketAddr::UnixUnsupported(path) => write!(f, "unix:{} (unsupported)", path),
+        }
+    }
+}
+
+// Enum to represent different types of read halves
+enum ReadHalf {
+    Tcp(TcpReadHalf),
+    #[cfg(unix)]
+    Unix(UnixReadHalf),
+}
+
+// Enum to represent different types of write halves
+enum WriteHalf {
+    Tcp(TcpWriteHalf),
+    #[cfg(unix)]
+    Unix(UnixWriteHalf),
+}
+
+// Implement AsyncRead for ReadHalf
+impl AsyncRead for ReadHalf {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ReadHalf::Tcp(tcp) => std::pin::Pin::new(tcp).poll_read(cx, buf),
+            #[cfg(unix)]
+            ReadHalf::Unix(unix) => std::pin::Pin::new(unix).poll_read(cx, buf),
+        }
+    }
+}
+
+// Implement AsyncWrite for WriteHalf
+impl AsyncWrite for WriteHalf {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            WriteHalf::Tcp(tcp) => std::pin::Pin::new(tcp).poll_write(cx, buf),
+            #[cfg(unix)]
+            WriteHalf::Unix(unix) => std::pin::Pin::new(unix).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WriteHalf::Tcp(tcp) => std::pin::Pin::new(tcp).poll_flush(cx),
+            #[cfg(unix)]
+            WriteHalf::Unix(unix) => std::pin::Pin::new(unix).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WriteHalf::Tcp(tcp) => std::pin::Pin::new(tcp).poll_shutdown(cx),
+            #[cfg(unix)]
+            WriteHalf::Unix(unix) => std::pin::Pin::new(unix).poll_shutdown(cx),
+        }
+    }
+}
 
 pub(crate) struct IoCore {
     pub id:   Uuid,
@@ -21,12 +113,49 @@ pub(crate) struct IoCore {
 }
 
 impl IoCore {
-    pub fn new(
+    pub fn new_tcp(
         stream: TcpStream,
-        addr: SocketAddr,
+        addr: std::net::SocketAddr,
         to_app: Option<Sender<ClientEvent>>, // Only inbound needs this
     ) -> Self {
         let (reader, writer) = stream.into_split();
+        let reader = ReadHalf::Tcp(reader);
+        let writer = WriteHalf::Tcp(writer);
+        let socket_addr = SocketAddr::Tcp(addr);
+
+        Self::new_internal(reader, writer, socket_addr, to_app)
+    }
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub fn new_unix(
+        stream: UnixStream,
+        path: String,
+        to_app: Option<Sender<ClientEvent>>, // Only inbound needs this
+    ) -> Self {
+        let (reader, writer) = stream.into_split();
+        let reader = ReadHalf::Unix(reader);
+        let writer = WriteHalf::Unix(writer);
+        let socket_addr = SocketAddr::Unix(path);
+
+        Self::new_internal(reader, writer, socket_addr, to_app)
+    }
+
+    #[cfg(not(unix))]
+    pub fn new_unix(
+        _stream: std::io::Error, // We use Error as a placeholder since UnixStream doesn't exist on non-Unix
+        path: String,
+        _to_app: Option<Sender<ClientEvent>>,
+    ) -> Self {
+        panic!("Unix sockets are not supported on this platform: {}", path);
+    }
+
+    fn new_internal(
+        reader: ReadHalf,
+        writer: WriteHalf,
+        addr: SocketAddr,
+        to_app: Option<Sender<ClientEvent>>,
+    ) -> Self {
         let (write_tx, write_rx) = mpsc::channel::<RapidTlvMessage>(100);
         let id = Uuid::new_v4();
 
@@ -75,7 +204,7 @@ impl IoCore {
        PRIVATE Loops - shortened from previous code without changes
     ---------------------------------------------------------------- */
     async fn read_task(
-        mut reader: OwnedReadHalf,
+        mut reader: ReadHalf,
         to_app_tx:  Sender<ClientEvent>,
         client_id: Uuid,
     ) -> Result<(), ClientError> {
@@ -198,7 +327,7 @@ impl IoCore {
     }
 
     async fn write_task(
-        mut writer: OwnedWriteHalf,
+        mut writer: WriteHalf,
         mut rx:     Receiver<RapidTlvMessage>,
     ) -> Result<(), ClientError> {
         rapid_debug!("Write task waiting for messages");
@@ -339,7 +468,7 @@ impl IoCore {
     }
 
     // Helper method to write data with timeout
-    async fn write_with_timeout(writer: &mut OwnedWriteHalf, data: &[u8]) -> Result<(), ClientError> {
+    async fn write_with_timeout(writer: &mut WriteHalf, data: &[u8]) -> Result<(), ClientError> {
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             writer.write_all(data)
@@ -357,7 +486,7 @@ impl IoCore {
     }
 
     // Helper method to flush with timeout
-    async fn flush_with_timeout(writer: &mut OwnedWriteHalf) -> Result<(), ClientError> {
+    async fn flush_with_timeout(writer: &mut WriteHalf) -> Result<(), ClientError> {
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             writer.flush()
@@ -376,7 +505,7 @@ impl IoCore {
 
     // Helper method to write large message in chunks
     async fn write_large_message_in_chunks(
-        writer: &mut OwnedWriteHalf,
+        writer: &mut WriteHalf,
         data: &[u8],
         chunk_size: usize,
         last_flush: &mut std::time::Instant

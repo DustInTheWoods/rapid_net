@@ -1,5 +1,5 @@
 use rapid_net::message::ClientEvent;
-use rapid_tlv::{RapidTlvMessage, RapidTlvEventType, RapidTlvFieldType};
+use rapid_tlv::RapidTlvMessage;
 use bytes::Bytes;
 use uuid::Uuid;
 use std::net::SocketAddr;
@@ -12,28 +12,6 @@ pub const MSG_ERROR: u8 = 0x04;
 pub const FIELD_KEY: u8 = 0x01;
 pub const FIELD_VALUE: u8 = 0x02;
 
-// We'll need to mock RapidClient for ServerEvent tests
-struct MockClient {
-    id: Uuid,
-    addr: SocketAddr,
-}
-
-impl MockClient {
-    fn new() -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            addr: "127.0.0.1:12345".parse().unwrap(),
-        }
-    }
-
-    fn id(&self) -> Uuid {
-        self.id
-    }
-
-    fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-}
 
 #[test]
 fn test_client_event_message() {
