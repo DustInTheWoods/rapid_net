@@ -243,7 +243,7 @@ impl IoCore {
             len_bytes_read = 0;
 
             let len = u32::from_be_bytes(len_buf) as usize;
-            rapid_debug!("Client {} received message with length: {}", client_id, len);
+            rapid_debug!("Server received from client {} message with length: {}", client_id, len);
 
             if len > 10 * 1024 * 1024 {
                 rapid_error!("Message too large for client {}: {} bytes", client_id, len);
@@ -293,10 +293,17 @@ impl IoCore {
                 }
             }
 
+            // Debug the first 10 bytes of the received message
+            let debug_len = std::cmp::min(10, read_buffer.len());
+            if debug_len > 0 {
+                let debug_bytes = &read_buffer[0..debug_len];
+                rapid_debug!("Server received from client {} first {} bytes: {:?}", client_id, debug_len, debug_bytes);
+            }
+
             // Parse the message directly from our buffer
             match RapidTlvMessage::parse(read_buffer.freeze()) {
                 Ok(msg) => {
-                    rapid_debug!("Client {} parsed message successfully", client_id);
+                    rapid_debug!("Server parsed message from client {} successfully", client_id);
                     let client_msg = ClientEvent::Message {
                         client_id,
                         message: msg,
@@ -305,7 +312,7 @@ impl IoCore {
                     // Use blocking sending to ensure a message is delivered
                     match to_app_tx.send(client_msg).await {
                         Ok(_) => {
-                            rapid_debug!("Client {} forwarded message to application", client_id);
+                            rapid_debug!("Server forwarded message from client {} to application", client_id);
                         },
                         Err(e) => {
                             rapid_error!("Failed to forward message for client {}: {:?}", client_id, e);
